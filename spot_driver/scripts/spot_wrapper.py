@@ -17,6 +17,8 @@ import bosdyn.api.robot_state_pb2 as robot_state_proto
 from bosdyn.api import basic_command_pb2
 from google.protobuf.timestamp_pb2 import Timestamp
 
+import threading
+
 front_image_sources = ['frontleft_fisheye_image', 'frontright_fisheye_image', 'frontleft_depth', 'frontright_depth']
 """List of image sources for front image periodic query"""
 side_image_sources = ['left_fisheye_image', 'right_fisheye_image', 'left_depth', 'right_depth']
@@ -129,46 +131,59 @@ class AsyncIdle(AsyncPeriodicQuery):
         self._spot_wrapper = spot_wrapper
 
     def _start_query(self):
-        if self._spot_wrapper._last_stand_command != None:
-            self._spot_wrapper._is_sitting = False
-            response = self._client.robot_command_feedback(self._spot_wrapper._last_stand_command)
-            if (response.feedback.mobility_feedback.stand_feedback.status ==
-                    basic_command_pb2.StandCommand.Feedback.STATUS_IS_STANDING):
-                self._spot_wrapper._is_standing = True
-                self._spot_wrapper._last_stand_command = None
-            else:
-                self._spot_wrapper._is_standing = False
+        with self._spot_wrapper._lock_parameter_access:
+            if self._spot_wrapper._last_stand_command != None:
+                try:
+                    response = self._client.robot_command_feedback(self._spot_wrapper._last_stand_command)
+                    self._spot_wrapper._is_sitting = False
+                    if (response.feedback.mobility_feedback.stand_feedback.status ==
+                            basic_command_pb2.StandCommand.Feedback.STATUS_IS_STANDING):
+                        self._spot_wrapper._is_standing = True
+                        self._spot_wrapper._last_stand_command = None
+                    else:
+                        self._spot_wrapper._is_standing = False
+                except ResponseError, RpcError as e:
+                    self.logger.error("Error getting robot command feedback: %s", e);
+                    self._spot_wrapper._last_stand_command = None
 
-        if self._spot_wrapper._last_sit_command != None:
-            self._spot_wrapper._is_standing = False
-            response = self._client.robot_command_feedback(self._spot_wrapper._last_sit_command)
-            if (response.feedback.mobility_feedback.sit_feedback.status ==
-                    basic_command_pb2.SitCommand.Feedback.STATUS_IS_SITTING):
-                self._spot_wrapper._is_sitting = True
-                self._spot_wrapper._last_sit_command = None
-            else:
-                self._spot_wrapper._is_sitting = False
+            if self._spot_wrapper._last_sit_command != None:
+                try:
+                    response = self._client.robot_command_feedback(self._spot_wrapper._last_sit_command)
+                    self._spot_wrapper._is_standing = False
+                    if (response.feedback.mobility_feedback.sit_feedback.status ==
+                            basic_command_pb2.SitCommand.Feedback.STATUS_IS_SITTING):
+                        self._spot_wrapper._is_sitting = True
+                        self._spot_wrapper._last_sit_command = None
+                    else:
+                        self._spot_wrapper._is_sitting = False
+                except ResponseError, RpcError as e:
+                    self.logger.error("Error getting robot command feedback: %s", e);
+                    self._spot_wrapper._last_sit_command = None
 
-        is_moving = False
+            is_moving = False
 
-        if self._spot_wrapper._last_motion_command_time != None:
-            if time.time() < self._spot_wrapper._last_motion_command_time:
-                is_moving = True
-            else:
-                self._spot_wrapper._last_motion_command_time = None
+            if self._spot_wrapper._last_motion_command_time != None:
+                if time.time() < self._spot_wrapper._last_motion_command_time:
+                    is_moving = True
+                else:
+                    self._spot_wrapper._last_motion_command_time = None
 
-        if self._spot_wrapper._last_motion_command != None:
-            response = self._client.robot_command_feedback(self._spot_wrapper._last_motion_command)
-            if (response.feedback.mobility_feedback.se2_trajectory_feedback.status ==
-                basic_command_pb2.SE2TrajectoryCommand.Feedback.STATUS_GOING_TO_GOAL):
-                is_moving = True
-            else:
-                self._spot_wrapper._last_motion_command = None
+            if self._spot_wrapper._last_motion_command != None:
+                try:
+                    response = self._client.robot_command_feedback(self._spot_wrapper._last_motion_command)
+                    if (response.feedback.mobility_feedback.se2_trajectory_feedback.status ==
+                        basic_command_pb2.SE2TrajectoryCommand.Feedback.STATUS_GOING_TO_GOAL):
+                        is_moving = True
+                    else:
+                        self._spot_wrapper._last_motion_command = None
+                except ResponseError, RpcError as e:
+                    self.logger.error("Error getting robot command feedback: %s", e);
+                    self._spot_wrapper._last_motion_command = None
 
-        self._spot_wrapper._is_moving = is_moving
+            self._spot_wrapper._is_moving = is_moving
 
-        if self._spot_wrapper.is_standing and not self._spot_wrapper.is_moving:
-            self._spot_wrapper.stand(False)
+            if self._spot_wrapper.is_standing and not self._spot_wrapper.is_moving:
+                self._spot_wrapper.stand(False)
 
 class SpotWrapper():
     """Generic wrapper class to encompass release 1.1.4 API features as well as maintaining leases automatically"""
@@ -190,6 +205,7 @@ class SpotWrapper():
         self._last_sit_command = None
         self._last_motion_command = None
         self._last_motion_command_time = None
+        self._lock_parameter_access = threading.Lock()
 
         self._front_image_requests = []
         for source in front_image_sources:
@@ -320,36 +336,39 @@ class SpotWrapper():
         Returns:
             google.protobuf.Timestamp
         """
+        with self._lock_parameter_access:
+            rtime = Timestamp()
+            rtime.seconds = timestamp.seconds - self.time_skew.seconds
+            rtime.nanos = timestamp.nanos - self.time_skew.nanos
+            if rtime.nanos < 0:
+                rtime.nanos = rtime.nanos + 1000000000
+                rtime.seconds = rtime.seconds - 1
 
-        rtime = Timestamp()
-        rtime.seconds = timestamp.seconds - self.time_skew.seconds
-        rtime.nanos = timestamp.nanos - self.time_skew.nanos
-        if rtime.nanos < 0:
-            rtime.nanos = rtime.nanos + 1000000000
-            rtime.seconds = rtime.seconds - 1
-
-        return rtime
+            return rtime
 
     def claim(self):
         """Get a lease for the robot, a handle on the estop endpoint, and the ID of the robot."""
-        try:
-            self._robot_id = self._robot.get_id()
-            self.getLease()
-            self.resetEStop()
-            return True, "Success"
-        except (ResponseError, RpcError) as err:
-            self._logger.error("Failed to initialize robot communication: %s", err)
-            return False, str(err)
+        with self._lock_parameter_access:
+            try:
+                self._robot_id = self._robot.get_id()
+                self.getLease()
+                self.resetEStop()
+                return True, "Success"
+            except (ResponseError, RpcError) as err:
+                self._logger.error("Failed to initialize robot communication: %s", err)
+                return False, str(err)
 
     def updateTasks(self):
         """Loop through all periodic tasks and update their data if needed."""
-        self._async_tasks.update()
+        with self._lock_parameter_access:
+            self._async_tasks.update()
 
     def resetEStop(self):
         """Get keepalive for eStop"""
-        self._estop_endpoint = EstopEndpoint(self._estop_client, 'ros', 9.0)
-        self._estop_endpoint.force_simple_setup()  # Set this endpoint as the robot's sole estop.
-        self._estop_keepalive = EstopKeepAlive(self._estop_endpoint)
+        with self._lock_parameter_access:
+            self._estop_endpoint = EstopEndpoint(self._estop_client, 'ros', 9.0)
+            self._estop_endpoint.force_simple_setup()  # Set this endpoint as the robot's sole estop.
+            self._estop_keepalive = EstopKeepAlive(self._estop_endpoint)
 
     def assertEStop(self, severe=True):
         """Forces the robot into eStop state.
@@ -357,49 +376,55 @@ class SpotWrapper():
         Args:
             severe: Default True - If true, will cut motor power immediately.  If false, will try to settle the robot on the ground first
         """
-        try:
-            if severe:
-                self._estop_endpoint.stop()
-            else:
-                self._estop_endpoint.settle_then_cut()
+        with self._lock_parameter_access:
+            try:
+                if severe:
+                    self._estop_endpoint.stop()
+                else:
+                    self._estop_endpoint.settle_then_cut()
 
-            return True, "Success"
-        except:
-            return False, "Error"
+                return True, "Success"
+            except:
+                return False, "Error"
 
     def releaseEStop(self):
         """Stop eStop keepalive"""
-        if self._estop_keepalive:
-            self._estop_keepalive.stop()
-            self._estop_keepalive = None
-            self._estop_endpoint = None
+        with self._lock_parameter_access:
+            if self._estop_keepalive:
+                self._estop_keepalive.stop()
+                self._estop_keepalive = None
+                self._estop_endpoint = None
 
     def getLease(self):
         """Get a lease for the robot and keep the lease alive automatically."""
-        self._lease = self._lease_client.acquire()
-        self._lease_keepalive = LeaseKeepAlive(self._lease_client)
+        with self._lock_parameter_access:
+            self._lease = self._lease_client.acquire()
+            self._lease_keepalive = LeaseKeepAlive(self._lease_client)
 
     def releaseLease(self):
         """Return the lease on the body."""
-        if self._lease:
-            self._lease_client.return_lease(self._lease)
-            self._lease = None
+        with self._lock_parameter_access:
+            if self._lease:
+                self._lease_client.return_lease(self._lease)
+                self._lease = None
 
     def release(self):
         """Return the lease on the body and the eStop handle."""
-        try:
-            self.releaseLease()
-            self.releaseEStop()
-            return True, "Success"
-        except Exception as e:
-            return False, str(e)
+        with self._lock_parameter_access:
+            try:
+                self.releaseLease()
+                self.releaseEStop()
+                return True, "Success"
+            except Exception as e:
+                return False, str(e)
 
     def disconnect(self):
         """Release control of robot as gracefully as posssible."""
-        if self._robot.time_sync:
-            self._robot.time_sync.stop()
-        self.releaseLease()
-        self.releaseEStop()
+        with self._lock_parameter_access:
+            if self._robot.time_sync:
+                self._robot.time_sync.stop()
+            self.releaseLease()
+            self.releaseEStop()
 
     def _robot_command(self, command_proto, end_time_secs=None):
         """Generic blocking function for sending commands to robots.
@@ -408,47 +433,54 @@ class SpotWrapper():
             command_proto: robot_command_pb2 object to send to the robot.  Usually made with RobotCommandBuilder
             end_time_secs: (optional) Time-to-live for the command in seconds
         """
-        try:
-            id = self._robot_command_client.robot_command(lease=None, command=command_proto, end_time_secs=end_time_secs)
-            return True, "Success", id
-        except Exception as e:
-            return False, str(e), None
+        with self._lock_parameter_access:
+            try:
+                id = self._robot_command_client.robot_command(lease=None, command=command_proto, end_time_secs=end_time_secs)
+                return True, "Success", id
+            except Exception as e:
+                return False, str(e), None
 
     def stop(self):
         """Stop the robot's motion."""
-        response = self._robot_command(RobotCommandBuilder.stop_command())
-        return response[0], response[1]
+        with self._lock_parameter_access:
+            response = self._robot_command(RobotCommandBuilder.stop_command())
+            return response[0], response[1]
 
     def self_right(self):
         """Have the robot self-right itself."""
-        response = self._robot_command(RobotCommandBuilder.selfright_command())
-        return response[0], response[1]
+        with self._lock_parameter_access:
+            response = self._robot_command(RobotCommandBuilder.selfright_command())
+            return response[0], response[1]
 
     def sit(self):
         """Stop the robot's motion and sit down if able."""
-        response = self._robot_command(RobotCommandBuilder.sit_command())
-        self._last_sit_command = response[2]
-        return response[0], response[1]
+        with self._lock_parameter_access:
+            response = self._robot_command(RobotCommandBuilder.sit_command())
+            self._last_sit_command = response[2]
+            return response[0], response[1]
 
     def stand(self, monitor_command=True):
         """If the e-stop is enabled, and the motor power is enabled, stand the robot up."""
-        response = self._robot_command(RobotCommandBuilder.stand_command(params=self._mobility_params))
-        if monitor_command:
-            self._last_stand_command = response[2]
-        return response[0], response[1]
+        with self._lock_parameter_access:
+            response = self._robot_command(RobotCommandBuilder.stand_command(params=self._mobility_params))
+            if monitor_command:
+                self._last_stand_command = response[2]
+            return response[0], response[1]
 
     def safe_power_off(self):
         """Stop the robot's motion and sit if possible.  Once sitting, disable motor power."""
-        response = self._robot_command(RobotCommandBuilder.safe_power_off_command())
-        return response[0], response[1]
+        with self._lock_parameter_access:
+            response = self._robot_command(RobotCommandBuilder.safe_power_off_command())
+            return response[0], response[1]
 
     def power_on(self):
         """Enble the motor power if e-stop is enabled."""
-        try:
-            power.power_on(self._power_client)
-            return True, "Success"
-        except:
-            return False, "Error"
+        with self._lock_parameter_access:
+            try:
+                power.power_on(self._power_client)
+                return True, "Success"
+            except:
+                return False, "Error"
 
     def set_mobility_params(self, body_height=0, footprint_R_body=EulerZXY(), locomotion_hint=1, stair_hint=False, external_force_params=None):
         """Define body, locomotion, and stair parameters.
@@ -459,7 +491,8 @@ class SpotWrapper():
             locomotion_hint: Locomotion hint
             stair_hint: Boolean to define stair motion
         """
-        self._mobility_params = RobotCommandBuilder.mobility_params(body_height, footprint_R_body, locomotion_hint, stair_hint, external_force_params)
+        with self._lock_parameter_access:
+            self._mobility_params = RobotCommandBuilder.mobility_params(body_height, footprint_R_body, locomotion_hint, stair_hint, external_force_params)
 
     def velocity_cmd(self, v_x, v_y, v_rot, cmd_duration=0.1):
         """Send a velocity motion command to the robot.
@@ -470,8 +503,9 @@ class SpotWrapper():
             v_rot: Angular velocity around the Z axis in radians
             cmd_duration: (optional) Time-to-live for the command in seconds.  Default is 125ms (assuming 10Hz command rate).
         """
-        end_time=time.time() + cmd_duration
-        self._robot_command(RobotCommandBuilder.velocity_command(
-                                      v_x=v_x, v_y=v_y, v_rot=v_rot, params=self._mobility_params),
-                                  end_time_secs=end_time)
-        self._last_motion_command_time = end_time
+        with self._lock_parameter_access:
+            end_time=time.time() + cmd_duration
+            self._robot_command(RobotCommandBuilder.velocity_command(
+                                          v_x=v_x, v_y=v_y, v_rot=v_rot, params=self._mobility_params),
+                                      end_time_secs=end_time)
+            self._last_motion_command_time = end_time
