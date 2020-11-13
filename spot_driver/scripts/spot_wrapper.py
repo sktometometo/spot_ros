@@ -143,7 +143,7 @@ class AsyncIdle(AsyncPeriodicQuery):
                     else:
                         self._spot_wrapper._is_standing = False
                 except (ResponseError, RpcError) as e:
-                    self.logger.error("Error getting robot command feedback: %s", e);
+                    self._logger.error("Error getting robot command feedback: %s", e);
                     self._spot_wrapper._last_stand_command = None
 
             if self._spot_wrapper._last_sit_command != None:
@@ -157,7 +157,7 @@ class AsyncIdle(AsyncPeriodicQuery):
                     else:
                         self._spot_wrapper._is_sitting = False
                 except (ResponseError, RpcError) as e:
-                    self.logger.error("Error getting robot command feedback: %s", e);
+                    self._logger.error("Error getting robot command feedback: %s", e);
                     self._spot_wrapper._last_sit_command = None
 
             is_moving = False
@@ -177,7 +177,7 @@ class AsyncIdle(AsyncPeriodicQuery):
                     else:
                         self._spot_wrapper._last_motion_command = None
                 except (ResponseError, RpcError) as e:
-                    self.logger.error("Error getting robot command feedback: %s", e);
+                    self._logger.error("Error getting robot command feedback: %s", e);
                     self._spot_wrapper._last_motion_command = None
 
             self._spot_wrapper._is_moving = is_moving
