@@ -182,8 +182,8 @@ class AsyncIdle(AsyncPeriodicQuery):
 
             self._spot_wrapper._is_moving = is_moving
 
-            if self._spot_wrapper.is_standing and not self._spot_wrapper.is_moving:
-                self._spot_wrapper.stand(False)
+        if self._spot_wrapper.is_standing and not self._spot_wrapper.is_moving:
+            self._spot_wrapper.stand(False)
 
 class SpotWrapper():
     """Generic wrapper class to encompass release 1.1.4 API features as well as maintaining leases automatically"""
@@ -348,27 +348,24 @@ class SpotWrapper():
 
     def claim(self):
         """Get a lease for the robot, a handle on the estop endpoint, and the ID of the robot."""
-        with self._lock_parameter_access:
-            try:
-                self._robot_id = self._robot.get_id()
-                self.getLease()
-                self.resetEStop()
-                return True, "Success"
-            except (ResponseError, RpcError) as err:
-                self._logger.error("Failed to initialize robot communication: %s", err)
-                return False, str(err)
+        try:
+            self._robot_id = self._robot.get_id()
+            self.getLease()
+            self.resetEStop()
+            return True, "Success"
+        except (ResponseError, RpcError) as err:
+            self._logger.error("Failed to initialize robot communication: %s", err)
+            return False, str(err)
 
     def updateTasks(self):
         """Loop through all periodic tasks and update their data if needed."""
-        with self._lock_parameter_access:
-            self._async_tasks.update()
+        self._async_tasks.update()
 
     def resetEStop(self):
         """Get keepalive for eStop"""
-        with self._lock_parameter_access:
-            self._estop_endpoint = EstopEndpoint(self._estop_client, 'ros', 9.0)
-            self._estop_endpoint.force_simple_setup()  # Set this endpoint as the robot's sole estop.
-            self._estop_keepalive = EstopKeepAlive(self._estop_endpoint)
+        self._estop_endpoint = EstopEndpoint(self._estop_client, 'ros', 9.0)
+        self._estop_endpoint.force_simple_setup()  # Set this endpoint as the robot's sole estop.
+        self._estop_keepalive = EstopKeepAlive(self._estop_endpoint)
 
     def assertEStop(self, severe=True):
         """Forces the robot into eStop state.
@@ -376,55 +373,49 @@ class SpotWrapper():
         Args:
             severe: Default True - If true, will cut motor power immediately.  If false, will try to settle the robot on the ground first
         """
-        with self._lock_parameter_access:
-            try:
-                if severe:
-                    self._estop_endpoint.stop()
-                else:
-                    self._estop_endpoint.settle_then_cut()
+        try:
+            if severe:
+                self._estop_endpoint.stop()
+            else:
+                self._estop_endpoint.settle_then_cut()
 
-                return True, "Success"
-            except:
-                return False, "Error"
+            return True, "Success"
+        except:
+            return False, "Error"
 
     def releaseEStop(self):
         """Stop eStop keepalive"""
-        with self._lock_parameter_access:
-            if self._estop_keepalive:
-                self._estop_keepalive.stop()
-                self._estop_keepalive = None
-                self._estop_endpoint = None
+        if self._estop_keepalive:
+            self._estop_keepalive.stop()
+            self._estop_keepalive = None
+            self._estop_endpoint = None
 
     def getLease(self):
         """Get a lease for the robot and keep the lease alive automatically."""
-        with self._lock_parameter_access:
-            self._lease = self._lease_client.acquire()
-            self._lease_keepalive = LeaseKeepAlive(self._lease_client)
+        self._lease = self._lease_client.acquire()
+        self._lease_keepalive = LeaseKeepAlive(self._lease_client)
 
     def releaseLease(self):
         """Return the lease on the body."""
-        with self._lock_parameter_access:
-            if self._lease:
-                self._lease_client.return_lease(self._lease)
-                self._lease = None
+        if self._lease:
+            self._lease_client.return_lease(self._lease)
+            self._lease = None
 
     def release(self):
         """Return the lease on the body and the eStop handle."""
-        with self._lock_parameter_access:
-            try:
-                self.releaseLease()
-                self.releaseEStop()
-                return True, "Success"
-            except Exception as e:
-                return False, str(e)
+        try:
+            self.releaseLease()
+            self.releaseEStop()
+            return True, "Success"
+        except Exception as e:
+            return False, str(e)
 
     def disconnect(self):
         """Release control of robot as gracefully as posssible."""
-        with self._lock_parameter_access:
-            if self._robot.time_sync:
-                self._robot.time_sync.stop()
-            self.releaseLease()
-            self.releaseEStop()
+        if self._robot.time_sync:
+            self._robot.time_sync.stop()
+        self.releaseLease()
+        self.releaseEStop()
 
     def _robot_command(self, command_proto, end_time_secs=None):
         """Generic blocking function for sending commands to robots.
@@ -433,24 +424,21 @@ class SpotWrapper():
             command_proto: robot_command_pb2 object to send to the robot.  Usually made with RobotCommandBuilder
             end_time_secs: (optional) Time-to-live for the command in seconds
         """
-        with self._lock_parameter_access:
-            try:
-                id = self._robot_command_client.robot_command(lease=None, command=command_proto, end_time_secs=end_time_secs)
-                return True, "Success", id
-            except Exception as e:
-                return False, str(e), None
+        try:
+            id = self._robot_command_client.robot_command(lease=None, command=command_proto, end_time_secs=end_time_secs)
+            return True, "Success", id
+        except Exception as e:
+            return False, str(e), None
 
     def stop(self):
         """Stop the robot's motion."""
-        with self._lock_parameter_access:
-            response = self._robot_command(RobotCommandBuilder.stop_command())
-            return response[0], response[1]
+        response = self._robot_command(RobotCommandBuilder.stop_command())
+        return response[0], response[1]
 
     def self_right(self):
         """Have the robot self-right itself."""
-        with self._lock_parameter_access:
-            response = self._robot_command(RobotCommandBuilder.selfright_command())
-            return response[0], response[1]
+        response = self._robot_command(RobotCommandBuilder.selfright_command())
+        return response[0], response[1]
 
     def sit(self):
         """Stop the robot's motion and sit down if able."""
@@ -469,18 +457,16 @@ class SpotWrapper():
 
     def safe_power_off(self):
         """Stop the robot's motion and sit if possible.  Once sitting, disable motor power."""
-        with self._lock_parameter_access:
-            response = self._robot_command(RobotCommandBuilder.safe_power_off_command())
-            return response[0], response[1]
+        response = self._robot_command(RobotCommandBuilder.safe_power_off_command())
+        return response[0], response[1]
 
     def power_on(self):
         """Enble the motor power if e-stop is enabled."""
-        with self._lock_parameter_access:
-            try:
-                power.power_on(self._power_client)
-                return True, "Success"
-            except:
-                return False, "Error"
+        try:
+            power.power_on(self._power_client)
+            return True, "Success"
+        except:
+            return False, "Error"
 
     def set_mobility_params(self, body_height=0, footprint_R_body=EulerZXY(), locomotion_hint=1, stair_hint=False, external_force_params=None):
         """Define body, locomotion, and stair parameters.
